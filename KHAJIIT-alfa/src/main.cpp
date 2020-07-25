@@ -1,294 +1,176 @@
+#include <Wire.h>
 #include <M5Stack.h>
-#include <WiFi.h>
-#include <DNSServer.h>
-#include <WiFiClient.h>
-#include <WiFiUdp.h>
-#include <OSCMessage.h>
-#include <esp_wifi.h>
-// SSID and PW for Config Portal
-const char* password = "your_password";
-// SSID and PW for your Router
-String Router_SSID;
-String Router_Pass;
-#include "I2Cdev.h"
-#include <ESP_WiFiManager.h>  
-#include "MPU6050_6Axis_MotionApps20.h"
-//#include "MPU6050.h" // not necessary if using MotionApps include file
-
-#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-#include "Wire.h"
-#endif
-
-MPU6050 mpu;
-
-bool dmpReady = false;  // set true if DMP init was successful
-uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
-uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
-uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
-uint16_t fifoCount;     // count of all bytes currently in FIFO
-uint8_t fifoBuffer[64]; // FIFO storage buffer
-
-/// orientation/motion vars
-Quaternion q;        // [w, x, y, z]         quaternion container
-VectorInt16 aa;      // [x, y, z]            accel sensor measurements
-VectorInt16 aaReal;  // [x, y, z]            gravity-free accel sensor measurements
-VectorInt16 aaWorld; // [x, y, z]            world-frame accel sensor measurements
-VectorFloat gravity; // [x, y, z]            gravity vector
 
 
-#define OUTPUT_TEAPOT_OSC
-
-#ifdef OUTPUT_READABLE_EULER
-float euler[3]; // [psi, theta, phi]    Euler angle container
-#endif
-#ifdef OUTPUT_READABLE_YAWPITCHROLL
-float ypr[3]; // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
-#endif
-
-#define INTERRUPT_PIN 15 // use pin 15 on ESP8266
-
-const char DEVICE_NAME[] = "mpu6050";
-
-WiFiUDP Udp;                            // A UDP instance to let us send and receive packets over UDP
-const IPAddress outIp(192, 168, 1, 11); // remote IP to receive OSC
-const unsigned int outPort = 9999;      // remote port to receive OSC
-
-// ================================================================
-// ===               INTERRUPT DETECTION ROUTINE                ===
-// ================================================================
-
-volatile bool mpuInterrupt = false; // indicates whether MPU interrupt pin has gone high
-void dmpDataReady()
+// This function read Nbytes bytes from I2C device at address Address. 
+// Put read bytes starting at register Register in the Data array. 
+void I2Cread(uint8_t Address, uint8_t Register, uint8_t Nbytes, uint8_t* Data)
 {
-  mpuInterrupt = true;
+  // Set register address
+  Wire.beginTransmission(Address);
+  Wire.write(Register);
+  Wire.endTransmission();
+  
+  // Read Nbytes
+  Wire.requestFrom(Address, Nbytes); 
+  uint8_t index=0;
+  while (Wire.available())
+    Data[index++]=Wire.read();
 }
 
-void mpu_setup()
+
+// Write a byte (Data) in device (Address) at register (Register)
+void I2CwriteByte(uint8_t Address, uint8_t Register, uint8_t Data)
 {
-  // join I2C bus (I2Cdev library doesn't do this automatically)
-#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+  // Set register address
+  Wire.beginTransmission(Address);
+  Wire.write(Register);
+  Wire.write(Data);
+  Wire.endTransmission();
+}
+
+
+
+// Initial time
+long int ti;
+volatile bool intFlag=false;
+
+// Initializations
+void setup()
+{
+  // Arduino initializations
   Wire.begin();
-  Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
-#elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
-  Fastwire::setup(400, true);
-#endif
-
-  // initialize device
-  Serial.println(F("Initializing I2C devices..."));
-  mpu.initialize();
-  pinMode(INTERRUPT_PIN, INPUT);
-
-  // verify connection
-  Serial.println(F("Testing device connections..."));
-  Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
-
-  // load and configure the DMP
-  Serial.println(F("Initializing DMP..."));
-  devStatus = mpu.dmpInitialize();
-
-  // supply your own gyro offsets here, scaled for min sensitivity
-  mpu.setXGyroOffset(220);
-  mpu.setYGyroOffset(76);
-  mpu.setZGyroOffset(-85);
-  mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
-
-  // make sure it worked (returns 0 if so)
-  if (devStatus == 0)
-  {
-    // turn on the DMP, now that it's ready
-    Serial.println(F("Enabling DMP..."));
-    mpu.setDMPEnabled(true);
-
-    // enable Arduino interrupt detection
-    Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
-    attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
-    mpuIntStatus = mpu.getIntStatus();
-
-    // set our DMP Ready flag so the main loop() function knows it's okay to use it
-    Serial.println(F("DMP ready! Waiting for first interrupt..."));
-    dmpReady = true;
-
-    // get expected DMP packet size for later comparison
-    packetSize = mpu.dmpGetFIFOPacketSize();
-  }
-  else
-  {
-    // ERROR!
-    // 1 = initial memory load failed
-    // 2 = DMP configuration updates failed
-    // (if it's going to break, usually the code will be 1)
-    Serial.print(F("DMP Initialization failed (code "));
-    Serial.print(devStatus);
-    Serial.println(F(")"));
-  }
-}
-
-void setup(void)
-{
   Serial.begin(115200);
-  Serial.println(F("\nOrientation Sensor OSC output"));
-  Serial.println();
-
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
-  ESP_WiFiManager ESP_wifiManager;
-  //reset saved settings
-  //wifiManager.resetSettings();
-
-  //fetches ssid and pass from eeprom and tries to connect
-  //if it does not connect it starts an access point with the specified name
-  //and goes into a blocking loop awaiting configuration
-  ESP_wifiManager.autoConnect(DEVICE_NAME);
-
-  Serial.print(F("WiFi connected! IP address: "));
-  Serial.println(WiFi.localIP());
-
-  mpu_setup();
+  
+  // Set accelerometers low pass filter at 5Hz
+  I2CwriteByte(MPU9250_ADDRESS,29,0x06);
+  // Set gyroscope low pass filter at 5Hz
+  I2CwriteByte(MPU9250_ADDRESS,26,0x06);
+ 
+  
+  // Configure gyroscope range
+  I2CwriteByte(MPU9250_ADDRESS,27,GYRO_FULL_SCALE_1000_DPS);
+  // Configure accelerometers range
+  I2CwriteByte(MPU9250_ADDRESS,28,ACC_FULL_SCALE_4_G);
+  // Set by pass mode for the magnetometers
+  I2CwriteByte(MPU9250_ADDRESS,0x37,0x02);
+  
+  // Request continuous magnetometer measurements in 16 bits
+  I2CwriteByte(MAG_ADDRESS,0x0A,0x16);
+  
+   pinMode(13, OUTPUT);
+  
 }
 
-void mpu_loop()
+
+
+
+
+// Counter
+long int cpt=0;
+
+void callback()
+{ 
+  intFlag=true;
+  digitalWrite(13, digitalRead(13) ^ 1);
+}
+
+// Main loop, read and display data
+void loop()
 {
-  // if programming failed, don't try to do anything
-  if (!dmpReady)
-    return;
+  while (!intFlag);
+  intFlag=false;
+  
+  // Display time
+  Serial.print (millis()-ti,DEC);
+  Serial.print ("\t");
 
-  // wait for MPU interrupt or extra packet(s) available
-  if (!mpuInterrupt && fifoCount < packetSize)
-    return;
+  
+  // _______________
+  // ::: Counter :::
+  
+  // Display data counter
+//  Serial.print (cpt++,DEC);
+//  Serial.print ("\t");
+  
+ 
+ 
+  // ____________________________________
+  // :::  accelerometer and gyroscope ::: 
 
-  // reset interrupt flag and get INT_STATUS byte
-  mpuInterrupt = false;
-  mpuIntStatus = mpu.getIntStatus();
+  // Read accelerometer and gyroscope
+  uint8_t Buf[14];
+  I2Cread(MPU9250_ADDRESS,0x3B,14,Buf);
+  
+  // Create 16 bits values from 8 bits data
+  
+  // Accelerometer
+  int16_t ax=-(Buf[0]<<8 | Buf[1]);
+  int16_t ay=-(Buf[2]<<8 | Buf[3]);
+  int16_t az=Buf[4]<<8 | Buf[5];
 
-  // get current FIFO count
-  fifoCount = mpu.getFIFOCount();
+  // Gyroscope
+  int16_t gx=-(Buf[8]<<8 | Buf[9]);
+  int16_t gy=-(Buf[10]<<8 | Buf[11]);
+  int16_t gz=Buf[12]<<8 | Buf[13];
+  
+    // Display values
+  
+  // Accelerometer
+  Serial.print (ax,DEC); 
+  Serial.print ("\t");
+  Serial.print (ay,DEC);
+  Serial.print ("\t");
+  Serial.print (az,DEC);  
+  Serial.print ("\t");
+  
+  // Gyroscope
+  Serial.print (gx,DEC); 
+  Serial.print ("\t");
+  Serial.print (gy,DEC);
+  Serial.print ("\t");
+  Serial.print (gz,DEC);  
+  Serial.print ("\t");
 
-  // check for overflow (this should never happen unless our code is too inefficient)
-  if ((mpuIntStatus & 0x10) || fifoCount == 1024)
+  
+  // _____________________
+  // :::  Magnetometer ::: 
+
+  
+  // Read register Status 1 and wait for the DRDY: Data Ready
+  
+  uint8_t ST1;
+  do
   {
-    // reset so we can continue cleanly
-    mpu.resetFIFO();
-    Serial.println(F("FIFO overflow!"));
-
-    // otherwise, check for DMP data ready interrupt (this should happen frequently)
+    I2Cread(MAG_ADDRESS,0x02,1,&ST1);
   }
-  else if (mpuIntStatus & 0x02)
-  {
-    // wait for correct available data length, should be a VERY short wait
-    while (fifoCount < packetSize)
-      fifoCount = mpu.getFIFOCount();
+  while (!(ST1&0x01));
 
-    // read a packet from FIFO
-    mpu.getFIFOBytes(fifoBuffer, packetSize);
+  // Read magnetometer data  
+  uint8_t Mag[7];  
+  I2Cread(MAG_ADDRESS,0x03,7,Mag);
+  
 
-    // track FIFO count here in case there is > 1 packet available
-    // (this lets us immediately read more without waiting for an interrupt)
-    fifoCount -= packetSize;
-
-#ifdef OUTPUT_READABLE_QUATERNION
-    // display quaternion values in easy matrix form: w x y z
-    mpu.dmpGetQuaternion(&q, fifoBuffer);
-    Serial.print("quat\t");
-    Serial.print(q.w);
-    Serial.print("\t");
-    Serial.print(q.x);
-    Serial.print("\t");
-    Serial.print(q.y);
-    Serial.print("\t");
-    Serial.println(q.z);
-#endif
-
-#ifdef OUTPUT_TEAPOT_OSC
-#ifndef OUTPUT_READABLE_QUATERNION
-    // display quaternion values in easy matrix form: w x y z
-    mpu.dmpGetQuaternion(&q, fifoBuffer);
-#endif
-    // Send OSC message
-    OSCMessage msg("/imuquat");
-    msg.add((float)q.w);
-    msg.add((float)q.x);
-    msg.add((float)q.y);
-    msg.add((float)q.z);
-
-    Udp.beginPacket(outIp, outPort);
-    msg.send(Udp);
-    Udp.endPacket();
-
-    msg.empty();
-#endif
-
-#ifdef OUTPUT_READABLE_EULER
-    // display Euler angles in degrees
-    mpu.dmpGetQuaternion(&q, fifoBuffer);
-    mpu.dmpGetEuler(euler, &q);
-    Serial.print("euler\t");
-    Serial.print(euler[0] * 180 / M_PI);
-    Serial.print("\t");
-    Serial.print(euler[1] * 180 / M_PI);
-    Serial.print("\t");
-    Serial.println(euler[2] * 180 / M_PI);
-#endif
-
-#ifdef OUTPUT_READABLE_YAWPITCHROLL
-    // display Euler angles in degrees
-    mpu.dmpGetQuaternion(&q, fifoBuffer);
-    mpu.dmpGetGravity(&gravity, &q);
-    mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-    Serial.print("ypr\t");
-    Serial.print(ypr[0] * 180 / M_PI);
-    Serial.print("\t");
-    Serial.print(ypr[1] * 180 / M_PI);
-    Serial.print("\t");
-    Serial.println(ypr[2] * 180 / M_PI);
-#endif
-
-#ifdef OUTPUT_READABLE_REALACCEL
-    // display real acceleration, adjusted to remove gravity
-    mpu.dmpGetQuaternion(&q, fifoBuffer);
-    mpu.dmpGetAccel(&aa, fifoBuffer);
-    mpu.dmpGetGravity(&gravity, &q);
-    mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-    Serial.print("areal\t");
-    Serial.print(aaReal.x);
-    Serial.print("\t");
-    Serial.print(aaReal.y);
-    Serial.print("\t");
-    Serial.println(aaReal.z);
-#endif
-
-#ifdef OUTPUT_READABLE_WORLDACCEL
-    // display initial world-frame acceleration, adjusted to remove gravity
-    // and rotated based on known orientation from quaternion
-    mpu.dmpGetQuaternion(&q, fifoBuffer);
-    mpu.dmpGetAccel(&aa, fifoBuffer);
-    mpu.dmpGetGravity(&gravity, &q);
-    mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-    mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
-    Serial.print("aworld\t");
-    Serial.print(aaWorld.x);
-    Serial.print("\t");
-    Serial.print(aaWorld.y);
-    Serial.print("\t");
-    Serial.println(aaWorld.z);
-#endif
-  }
+  // Create 16 bits values from 8 bits data
+  
+  // Magnetometer
+  int16_t mx=-(Mag[3]<<8 | Mag[2]);
+  int16_t my=-(Mag[1]<<8 | Mag[0]);
+  int16_t mz=-(Mag[5]<<8 | Mag[4]);
+  
+  
+  // Magnetometer
+  Serial.print (mx+200,DEC); 
+  Serial.print ("\t");
+  Serial.print (my-70,DEC);
+  Serial.print ("\t");
+  Serial.print (mz-700,DEC);  
+  Serial.print ("\t");
+  
+  
+  
+  // End of line
+  Serial.println("");
+//  delay(100);    
 }
 
-/**************************************************************************/
-/*
-    Arduino loop function, called once 'setup' is complete (your own code
-    should go here)
-*/
-/**************************************************************************/
-void loop(void)
-{
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.println();
-    Serial.println("*** Disconnected from AP so rebooting ***");
-    Serial.println();
-    ESP.restart();
-  }
-
-  mpu_loop();
-}
