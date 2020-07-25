@@ -1,57 +1,26 @@
-
-/* This driver reads quaternion data from the MPU6060 and sends
-   Open Sound Control messages.
-  GY-521  NodeMCU
-  MPU6050 devkit 1.0
-  board   Lolin         Description
-  ======= ==========    ====================================================
-  VCC     VU (5V USB)   Not available on all boards so use 3.3V if needed.
-  GND     G             Ground
-  SCL     D1 (GPIO05)   I2C clock
-  SDA     D2 (GPIO04)   I2C data
-  XDA     not connected
-  XCL     not connected
-  AD0     not connected
-  INT     D8 (GPIO15)   Interrupt pin
-*/
-
-//#if defined(ESP8266)
-//#include <ESP8266WiFi.h>
 #include <M5Stack.h>
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
 #include <OSCMessage.h>
-#include <WiFiManager.h> //https://github.com/tzapu/WiFiManager
-
-// I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
-// for both classes must be in the include path of your project
+#include <esp_wifi.h>
+// SSID and PW for Config Portal
+const char* password = "your_password";
+// SSID and PW for your Router
+String Router_SSID;
+String Router_Pass;
 #include "I2Cdev.h"
-
+#include <ESP_WiFiManager.h>  
 #include "MPU6050_6Axis_MotionApps20.h"
 //#include "MPU6050.h" // not necessary if using MotionApps include file
 
-// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
-// is used in I2Cdev.h
 #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
 #include "Wire.h"
 #endif
 
-// class default I2C address is 0x68
-// specific I2C addresses may be passed as a parameter here
-// AD0 low = 0x68 (default for SparkFun breakout and InvenSense evaluation board)
-// AD0 high = 0x69
 MPU6050 mpu;
-//MPU6050 mpu(0x69); // <-- use for AD0 high
 
-/* =========================================================================
-   NOTE: In addition to connection 5/3.3v, GND, SDA, and SCL, this sketch
-   depends on the MPU-6050's INT pin being connected to the ESP8266 GPIO15
-   pin.
- * ========================================================================= */
-
-// MPU control/status vars
 bool dmpReady = false;  // set true if DMP init was successful
 uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
 uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
@@ -59,46 +28,14 @@ uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
 uint16_t fifoCount;     // count of all bytes currently in FIFO
 uint8_t fifoBuffer[64]; // FIFO storage buffer
 
-// orientation/motion vars
+/// orientation/motion vars
 Quaternion q;        // [w, x, y, z]         quaternion container
 VectorInt16 aa;      // [x, y, z]            accel sensor measurements
 VectorInt16 aaReal;  // [x, y, z]            gravity-free accel sensor measurements
 VectorInt16 aaWorld; // [x, y, z]            world-frame accel sensor measurements
 VectorFloat gravity; // [x, y, z]            gravity vector
 
-// uncomment "OUTPUT_READABLE_QUATERNION" if you want to see the actual
-// quaternion components in a [w, x, y, z] format (not best for parsing
-// on a remote host such as Processing or something though)
-//#define OUTPUT_READABLE_QUATERNION
 
-// uncomment "OUTPUT_READABLE_EULER" if you want to see Euler angles
-// (in degrees) calculated from the quaternions coming from the FIFO.
-// Note that Euler angles suffer from gimbal lock (for more info, see
-// http://en.wikipedia.org/wiki/Gimbal_lock)
-//#define OUTPUT_READABLE_EULER
-
-// uncomment "OUTPUT_READABLE_YAWPITCHROLL" if you want to see the yaw/
-// pitch/roll angles (in degrees) calculated from the quaternions coming
-// from the FIFO. Note this also requires gravity vector calculations.
-// Also note that yaw/pitch/roll angles suffer from gimbal lock (for
-// more info, see: http://en.wikipedia.org/wiki/Gimbal_lock)
-//#define OUTPUT_READABLE_YAWPITCHROLL
-
-// uncomment "OUTPUT_READABLE_REALACCEL" if you want to see acceleration
-// components with gravity removed. This acceleration reference frame is
-// not compensated for orientation, so +X is always +X according to the
-// sensor, just without the effects of gravity. If you want acceleration
-// compensated for orientation, us OUTPUT_READABLE_WORLDACCEL instead.
-//#define OUTPUT_READABLE_REALACCEL
-
-// uncomment "OUTPUT_READABLE_WORLDACCEL" if you want to see acceleration
-// components with gravity removed and adjusted for the world frame of
-// reference (yaw is relative to initial orientation, since no magnetometer
-// is present in this case). Could be quite handy in some cases.
-//#define OUTPUT_READABLE_WORLDACCEL
-
-// uncomment "OUTPUT_TEAPOT_OSC" if you want output that matches the
-// format used for the InvenSense teapot demo
 #define OUTPUT_TEAPOT_OSC
 
 #ifdef OUTPUT_READABLE_EULER
@@ -194,14 +131,14 @@ void setup(void)
 
   //WiFiManager
   //Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wifiManager;
+  ESP_WiFiManager ESP_wifiManager;
   //reset saved settings
   //wifiManager.resetSettings();
 
   //fetches ssid and pass from eeprom and tries to connect
   //if it does not connect it starts an access point with the specified name
   //and goes into a blocking loop awaiting configuration
-  wifiManager.autoConnect(DEVICE_NAME);
+  ESP_wifiManager.autoConnect(DEVICE_NAME);
 
   Serial.print(F("WiFi connected! IP address: "));
   Serial.println(WiFi.localIP());
@@ -350,7 +287,7 @@ void loop(void)
     Serial.println();
     Serial.println("*** Disconnected from AP so rebooting ***");
     Serial.println();
-    ESP.reset();
+    ESP.restart();
   }
 
   mpu_loop();
